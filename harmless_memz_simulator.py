@@ -62,7 +62,7 @@ class FloatingWindow:
     height: int
     phase: float
 
-    def update(self, max_w: int, max_h: int, pulse: float) -> None:
+    def update(self, max_w: int, max_h: int, pulse: float) -> bool:
         """Move the window with bounce physics and mild sinusoidal perturbation."""
         self.x += self.vx + math.sin(self.phase + pulse) * 0.9
         self.y += self.vy + math.cos(self.phase + pulse * 1.2) * 0.9
@@ -81,7 +81,11 @@ class FloatingWindow:
             self.y = max(0, max_h - self.height)
             self.vy = -abs(self.vy)
 
-        self.window.geometry(f"{self.width}x{self.height}+{int(self.x)}+{int(self.y)}")
+        try:
+            self.window.geometry(f"{self.width}x{self.height}+{int(self.x)}+{int(self.y)}")
+            return True
+        except tk.TclError:
+            return False
 
 
 class HarmlessMemzSimulator:
@@ -104,6 +108,19 @@ class HarmlessMemzSimulator:
         self.root.after(FRAME_DELAY_MS, self._tick)
         self.root.after(STYLE_DELAY_MS, self._shuffle_styles)
 
+    def _block_close(self) -> None:
+        """Ignore close requests to keep the visual effect running until timeout."""
+        return
+
+    def _handle_unmap(self, event: tk.Event[tk.Misc], top: tk.Toplevel) -> None:
+        """Prevent minimize/iconify by restoring windows immediately."""
+        try:
+            if str(top.state()) == "iconic":
+                top.after(1, top.deiconify)
+                top.after(2, lambda: top.attributes("-topmost", True))
+        except tk.TclError:
+            pass
+
     def _create_window(self) -> FloatingWindow:
         width = random.randint(MIN_WINDOW_SIZE, MAX_WINDOW_SIZE)
         height = random.randint(MIN_WINDOW_SIZE, MAX_WINDOW_SIZE)
@@ -114,9 +131,12 @@ class HarmlessMemzSimulator:
         vy = random.choice([-1, 1]) * random.uniform(7.5, 12.5)
 
         top = tk.Toplevel(self.root)
-        top.overrideredirect(False)
+        top.overrideredirect(True)
         top.attributes("-topmost", True)
         top.resizable(False, False)
+        top.protocol("WM_DELETE_WINDOW", self._block_close)
+        top.bind("<Alt-F4>", lambda event: "break")
+        top.bind("<Unmap>", lambda event, t=top: self._handle_unmap(event, t))
 
         background = random.choice(COLORS)
         foreground = "black" if background in {"#FFFFFF", "#FFD400"} else "white"
@@ -155,8 +175,14 @@ class HarmlessMemzSimulator:
         self.tick_count += 1
         pulse = self.tick_count * 0.11
 
+        survivors: list[FloatingWindow] = []
         for fw in self.windows:
-            fw.update(self.screen_w, self.screen_h, pulse)
+            if fw.update(self.screen_w, self.screen_h, pulse):
+                survivors.append(fw)
+
+        self.windows = survivors
+        while len(self.windows) < WINDOW_COUNT:
+            self.windows.append(self._create_window())
 
         self.root.after(FRAME_DELAY_MS, self._tick)
 
@@ -168,27 +194,28 @@ class HarmlessMemzSimulator:
         invert = random.random() < 0.4
 
         for fw in self.windows:
-            # Flashing effect by frequent color inversions or random recolors.
-            if invert:
-                current_bg = str(fw.label.cget("bg"))
-                current_fg = str(fw.label.cget("fg"))
-                fw.label.configure(bg=current_fg, fg=current_bg)
-            else:
-                bg = random.choice(COLORS)
-                fg = "black" if bg in {"#FFFFFF", "#FFD400"} else "white"
-                fw.label.configure(bg=bg, fg=fg)
+            try:
+                if invert:
+                    current_bg = str(fw.label.cget("bg"))
+                    current_fg = str(fw.label.cget("fg"))
+                    fw.label.configure(bg=current_fg, fg=current_bg)
+                else:
+                    bg = random.choice(COLORS)
+                    fg = "black" if bg in {"#FFFFFF", "#FFD400"} else "white"
+                    fw.label.configure(bg=bg, fg=fg)
 
-            if random.random() < 0.55:
-                fw.label.configure(
-                    text=random.choice(MESSAGES),
-                    font=("Segoe UI", random.randint(10, 22), "bold"),
-                )
+                if random.random() < 0.55:
+                    fw.label.configure(
+                        text=random.choice(MESSAGES),
+                        font=("Segoe UI", random.randint(10, 22), "bold"),
+                    )
 
-            # Controlled jitter and acceleration to keep movement chaotic but stable.
-            fw.vx += random.uniform(-1.2, 1.2)
-            fw.vy += random.uniform(-1.2, 1.2)
-            fw.vx = max(-MAX_SPEED, min(MAX_SPEED, fw.vx))
-            fw.vy = max(-MAX_SPEED, min(MAX_SPEED, fw.vy))
+                fw.vx += random.uniform(-1.2, 1.2)
+                fw.vy += random.uniform(-1.2, 1.2)
+                fw.vx = max(-MAX_SPEED, min(MAX_SPEED, fw.vx))
+                fw.vy = max(-MAX_SPEED, min(MAX_SPEED, fw.vy))
+            except tk.TclError:
+                continue
 
         self.root.after(STYLE_DELAY_MS, self._shuffle_styles)
 
