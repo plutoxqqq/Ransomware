@@ -1,0 +1,115 @@
+// ==UserScript==
+// @name         Human Benchmark Typing - v9 Fast & Simple
+// @namespace    http://tampermonkey.net/
+// @version      0.9
+// @description  Fast typing with optional errors, restart support
+// @author       You
+// @match        https://humanbenchmark.com/tests/typing*
+// @grant        none
+// @run-at       document-end
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // ──────────────── SETTINGS ────────────────
+    const TARGET_WPM     = 10000000;     // Desired average WPM (higher = faster)
+    const NUMBER_OF_ERRORS = 0;     // Intentional wrong characters (0 = perfect)
+    const ADD_JITTER     = false;   // Small random per-char delay
+
+    const MS_PER_CHAR    = 60000 / TARGET_WPM / 5; // avg 5 chars/word
+
+    let isTyping = false;
+    let lastCharCount = 0;
+
+    function getSpans() {
+        return document.querySelectorAll('span.letter, span.char, .incomplete, .word span, div[class*="prompt"] span, div > span:not([class*="header"])');
+    }
+
+    function getText() {
+        const spans = getSpans();
+        if (spans.length < 30) return null;
+
+        let text = Array.from(spans).map(s => s.textContent || '').join('').trim();
+
+        if (NUMBER_OF_ERRORS > 0 && text.length > NUMBER_OF_ERRORS * 10) {
+            const pos = new Set();
+            while (pos.size < NUMBER_OF_ERRORS) pos.add(Math.floor(Math.random() * text.length));
+            let arr = text.split('');
+            for (let p of pos) {
+                let w = 'abcdefghijklmnopqrstuvwxyz'[Math.floor(Math.random() * 26)];
+                if (w === arr[p]) w = w === 'z' ? 'y' : String.fromCharCode(arr[p].charCodeAt(0) + 1);
+                arr[p] = w;
+            }
+            text = arr.join('');
+        }
+
+        return text + ' ';
+    }
+
+    function getContainer() {
+        const s = getSpans();
+        return s.length ? s[0].parentElement : null;
+    }
+
+    function sendChar(el, char) {
+        if (!el) return;
+        el.focus?.();
+
+        if (!document.execCommand('insertText', false, char)) {
+            const ev = new InputEvent('input', {bubbles: true, data: char, inputType: 'insertText'});
+            el.dispatchEvent(ev);
+            ['keydown','keypress','keyup'].forEach(n => {
+                el.dispatchEvent(new KeyboardEvent(n, {key: char, bubbles: true}));
+            });
+        }
+    }
+
+    function type() {
+        if (isTyping) return;
+        isTyping = true;
+
+        const container = getContainer();
+        const text = getText();
+
+        if (!container || !text || text.length < 50) {
+            isTyping = false;
+            return;
+        }
+
+        console.log(`[HB v9] Typing ${text.length} chars @ ~${TARGET_WPM} wpm`);
+
+        let i = 0;
+        function next() {
+            if (i >= text.length || getSpans().length === 0) {
+                isTyping = false;
+                return;
+            }
+
+            sendChar(container, text[i++]);
+
+            let delay = MS_PER_CHAR;
+            if (ADD_JITTER) delay += Math.random() * 8 - 4;
+
+            setTimeout(next, Math.max(0, delay));
+        }
+
+        next();
+    }
+
+    new MutationObserver(() => {
+        const s = getSpans();
+        if (s.length > 30 && s.length !== lastCharCount) {
+            lastCharCount = s.length;
+            setTimeout(type, 300);
+        }
+    }).observe(document.body, {childList:true, subtree:true, characterData:true, attributes:true});
+
+    setInterval(() => {
+        if (getSpans().length > 30 && !isTyping) type();
+    }, 600);
+
+    setTimeout(type, 1200);
+
+    console.log('[HB v9] Loaded – edit TARGET_WPM / NUMBER_OF_ERRORS above');
+})();
