@@ -1,129 +1,111 @@
 // ==UserScript==
-// @name         Human Benchmark Typing - v9
-// @namespace    http://tampermonkey.net/
-// @version      1.0
-// @description  Automated typing with optional intentional errors and restart support
-// @author       You
-// @match        https://humanbenchmark.com/tests/typing*
-// @grant        none
-// @run-at       document-end
+// @name Monkeytype Typing - v14 True WPM, Zero Errors, Auto-Space
+// @namespace http://tampermonkey.net/
+// @version 1.4
+// @description Character-accurate, DOM-synced, error-proof typing with real WPM control (for fun only)
+// @author You
+// @match https://monkeytype.com/*
+// @grant none
+// @run-at document-end
 // ==/UserScript==
 
-(function () {
+(function() {
     'use strict';
 
-    // ──────────────── SETTINGS ────────────────
-    const TARGET_WPM = 500;         // Desired average words per minute
-    const NUMBER_OF_ERRORS = 0;     // Intentional wrong characters (0 = perfect)
-    const ADD_JITTER = false;       // Small random variation in pacing
+    // ───────────── SETTINGS ─────────────
+    const TARGET_WPM = 5000; // ← this now scales correctly
+    const NUMBER_OF_ERRORS = 0;
 
-    const CHARS_PER_WORD = 5;
-    const CHARS_PER_MS = (TARGET_WPM * CHARS_PER_WORD) / 60000;
+    // ms per character (5 chars per word)
+    const MS_PER_CHAR = 60000 / (TARGET_WPM * 5);
 
     let isTyping = false;
-    let lastCharCount = 0;
+    let errorsMade = 0;
 
-    function getSpans() {
-        return document.querySelectorAll('span.letter, span.char, .incomplete, .word span, div[class*="prompt"] span, div > span:not([class*="header"])');
+    function canType() {
+        return !!document.querySelector('#words .word.active');
     }
 
-    function getText() {
-        const spans = getSpans();
-        if (spans.length < 30) return null;
-
-        let text = Array.from(spans).map((s) => s.textContent || '').join('').trim();
-
-        if (NUMBER_OF_ERRORS > 0 && text.length > NUMBER_OF_ERRORS * 10) {
-            const positions = new Set();
-            while (positions.size < NUMBER_OF_ERRORS) {
-                positions.add(Math.floor(Math.random() * text.length));
+    function getNextLetterNode() {
+        const active = document.querySelector('.word.active');
+        if (!active) return null;
+        const letters = active.querySelectorAll('letter');
+        for (let l of letters) {
+            if (!l.classList.contains('correct') &&
+                !l.classList.contains('incorrect')) {
+                return l;
             }
-
-            const chars = text.split('');
-            for (const position of positions) {
-                let replacement = 'abcdefghijklmnopqrstuvwxyz'[Math.floor(Math.random() * 26)];
-                if (replacement === chars[position]) {
-                    replacement = replacement === 'z' ? 'y' : String.fromCharCode(chars[position].charCodeAt(0) + 1);
-                }
-                chars[position] = replacement;
-            }
-            text = chars.join('');
         }
-
-        return `${text} `;
+        return null;
     }
 
-    function getContainer() {
-        const spans = getSpans();
-        return spans.length ? spans[0].parentElement : null;
+    function pressKey(char) {
+        const el = document.getElementById('wordsInput');
+        if (!el) return;
+        el.focus?.();
+
+        if (document.execCommand('insertText', false, char)) return;
+
+        const ev = new InputEvent('input', { bubbles: true, data: char, inputType: 'insertText' });
+        el.dispatchEvent(ev);
+
+        ['keydown','keypress','keyup'].forEach(type => {
+            el.dispatchEvent(new KeyboardEvent(type, { key: char, bubbles: true }));
+        });
     }
 
-    function sendChar(element, char) {
-        if (!element) return;
-        element.focus?.();
-
-        if (!document.execCommand('insertText', false, char)) {
-            element.dispatchEvent(new InputEvent('input', { bubbles: true, data: char, inputType: 'insertText' }));
-            ['keydown', 'keypress', 'keyup'].forEach((eventName) => {
-                element.dispatchEvent(new KeyboardEvent(eventName, { key: char, bubbles: true }));
-            });
-        }
-    }
-
-    function type() {
-        if (isTyping) return;
-        isTyping = true;
-
-        const container = getContainer();
-        const text = getText();
-
-        if (!container || !text || text.length < 50) {
+    function typeNext() {
+        if (!isTyping || !canType()) {
             isTyping = false;
             return;
         }
 
-        console.log(`[HB v9] Typing ${text.length} chars with target ${TARGET_WPM} WPM`);
+        let letterNode = getNextLetterNode();
 
-        let i = 0;
-        const startedAt = performance.now();
-
-        function next() {
-            if (i >= text.length || getSpans().length === 0) {
-                isTyping = false;
-                return;
-            }
-
-            const now = performance.now();
-            let shouldHaveTyped = Math.floor((now - startedAt) * CHARS_PER_MS);
-            if (ADD_JITTER) {
-                shouldHaveTyped += Math.floor(Math.random() * 3) - 1;
-            }
-
-            const targetIndex = Math.min(text.length, Math.max(i + 1, shouldHaveTyped));
-            while (i < targetIndex) {
-                sendChar(container, text[i]);
-                i += 1;
-            }
-
-            setTimeout(next, 0);
+        // If no letters left → type space
+        if (!letterNode) {
+            pressKey(' ');
+            return setTimeout(typeNext, MS_PER_CHAR);
         }
 
-        next();
+        let char = letterNode.textContent || '';
+
+        // optional errors
+        if (NUMBER_OF_ERRORS > 0 &&
+            errorsMade < NUMBER_OF_ERRORS &&
+            /[a-zA-Z]/.test(char)) {
+            errorsMade++;
+            char = String.fromCharCode(char.charCodeAt(0) + 1);
+        }
+
+        pressKey(char);
+
+        // Wait for Monkeytype to mark the letter before continuing
+        const check = () => {
+            if (letterNode.classList.contains('correct') ||
+                letterNode.classList.contains('incorrect')) {
+                setTimeout(typeNext, MS_PER_CHAR);
+            } else {
+                requestAnimationFrame(check);
+            }
+        };
+        requestAnimationFrame(check);
+    }
+
+    function startTyping() {
+        if (isTyping) return;
+        isTyping = true;
+        errorsMade = 0;
+        typeNext();
     }
 
     new MutationObserver(() => {
-        const spans = getSpans();
-        if (spans.length > 30 && spans.length !== lastCharCount) {
-            lastCharCount = spans.length;
-            setTimeout(type, 300);
-        }
-    }).observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true });
+        if (canType() && !isTyping) startTyping();
+    }).observe(document.body, { childList: true, subtree: true });
 
     setInterval(() => {
-        if (getSpans().length > 30 && !isTyping) type();
-    }, 600);
+        if (canType() && !isTyping) startTyping();
+    }, 300);
 
-    setTimeout(type, 1200);
-
-    console.log('[HB v9] Loaded. Edit TARGET_WPM / NUMBER_OF_ERRORS above.');
+    console.log(`[MT v14] Loaded – True WPM: ${TARGET_WPM}, Zero Errors`);
 })();
