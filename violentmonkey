@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Monkeytype Auto Typer (Accurate, Mode-Compatible)
+// @name         Monkeytype Auto Typer (Accurate, Fast, Mode-Compatible)
 // @namespace    https://monkeytype.com/
-// @version      2.0.0
-// @description  Types exactly what Monkeytype expects across words, quotes, punctuation, and numbers modes. For educational/testing purposes only.
+// @version      2.1.0
+// @description  Types exactly what Monkeytype expects across words, quotes, punctuation, and numbers modes with higher speed and stability.
 // @author       You
 // @match        https://monkeytype.com/*
 // @grant        none
@@ -13,11 +13,12 @@
     'use strict';
 
     const SETTINGS = {
-        targetWpm: 180,
+        targetWpm: 1200,
         maxIntentionalErrors: 0,
         autoStart: true,
-        pollIntervalMs: 250,
-        verificationTimeoutMs: 900,
+        pollIntervalMs: 150,
+        minKeyDelayMs: 0,
+        maxKeyDelayMs: 50,
         hotkey: {
             ctrlKey: true,
             altKey: true,
@@ -35,12 +36,14 @@
     const engine = {
         running: false,
         intentionalErrorsUsed: 0,
-        lastTypedAt: 0
+        lastLetterNode: null,
+        loopTimer: null
     };
 
     function msPerCharacter() {
         const safeWpm = Math.max(1, Number(SETTINGS.targetWpm) || 1);
-        return 60000 / (safeWpm * 5);
+        const computed = 60000 / (safeWpm * 5);
+        return Math.min(SETTINGS.maxKeyDelayMs, Math.max(SETTINGS.minKeyDelayMs, computed));
     }
 
     function getWordsInput() {
@@ -71,72 +74,47 @@
     function nextErrorCharacter(char) {
         if (!char) return char;
 
-        if (/[a-z]/.test(char)) {
-            return char === 'z' ? 'a' : String.fromCharCode(char.charCodeAt(0) + 1);
-        }
-        if (/[A-Z]/.test(char)) {
-            return char === 'Z' ? 'A' : String.fromCharCode(char.charCodeAt(0) + 1);
-        }
-        if (/[0-9]/.test(char)) {
-            return char === '9' ? '0' : String.fromCharCode(char.charCodeAt(0) + 1);
-        }
+        if (/[a-z]/.test(char)) return char === 'z' ? 'a' : String.fromCharCode(char.charCodeAt(0) + 1);
+        if (/[A-Z]/.test(char)) return char === 'Z' ? 'A' : String.fromCharCode(char.charCodeAt(0) + 1);
+        if (/[0-9]/.test(char)) return char === '9' ? '0' : String.fromCharCode(char.charCodeAt(0) + 1);
 
         return 'x';
     }
 
-    function dispatchKeyboardEvents(target, key) {
-        const eventInit = {
-            key,
-            code: key === ' ' ? 'Space' : undefined,
-            bubbles: true,
-            cancelable: true,
-            composed: true
-        };
+    function emitKey(input, key) {
+        const keyCode = key === ' ' ? 'Space' : undefined;
+        const eventInit = { key, code: keyCode, bubbles: true, cancelable: true, composed: true };
+        input.dispatchEvent(new KeyboardEvent('keydown', eventInit));
+        input.dispatchEvent(new KeyboardEvent('keypress', eventInit));
 
-        target.dispatchEvent(new KeyboardEvent('keydown', eventInit));
-        target.dispatchEvent(new KeyboardEvent('keypress', eventInit));
-        target.dispatchEvent(new KeyboardEvent('keyup', eventInit));
-    }
-
-    function dispatchInput(target, text) {
         const beforeInput = new InputEvent('beforeinput', {
             bubbles: true,
             cancelable: true,
             composed: true,
-            data: text,
+            data: key,
             inputType: 'insertText'
         });
-        target.dispatchEvent(beforeInput);
+        input.dispatchEvent(beforeInput);
 
-        const inserted = document.execCommand && document.execCommand('insertText', false, text);
-
-        if (!inserted) {
-            target.value = (target.value || '') + text;
-            target.dispatchEvent(new InputEvent('input', {
-                bubbles: true,
-                cancelable: false,
-                composed: true,
-                data: text,
-                inputType: 'insertText'
-            }));
+        if (document.execCommand) {
+            document.execCommand('insertText', false, key);
         }
-    }
 
-    function typeCharacter(char) {
-        const input = getWordsInput();
-        if (!input) return false;
+        input.dispatchEvent(new InputEvent('input', {
+            bubbles: true,
+            cancelable: false,
+            composed: true,
+            data: key,
+            inputType: 'insertText'
+        }));
 
-        input.focus();
-        dispatchKeyboardEvents(input, char);
-        dispatchInput(input, char);
-        engine.lastTypedAt = performance.now();
-        return true;
+        input.dispatchEvent(new KeyboardEvent('keyup', eventInit));
     }
 
     function calculateCharacterToType(letterNode) {
         let character = letterNode?.textContent ?? '';
-
         if (!character) return '';
+
         character = character.replace(/\u00A0/g, ' ');
 
         if (
@@ -151,13 +129,27 @@
         return character;
     }
 
+    function typeCharacter(char) {
+        const input = getWordsInput();
+        if (!input || !char) return;
+
+        input.focus();
+        emitKey(input, char);
+    }
+
     function stopTyping(reason) {
         if (!engine.running) return;
+
         engine.running = false;
+        engine.lastLetterNode = null;
+        if (engine.loopTimer) {
+            clearTimeout(engine.loopTimer);
+            engine.loopTimer = null;
+        }
         console.info(`[Monkeytype Auto Typer] Stopped: ${reason}`);
     }
 
-    function runStep() {
+    function tick() {
         if (!engine.running) return;
 
         if (!canType()) {
@@ -169,54 +161,32 @@
 
         if (!nextLetter) {
             typeCharacter(' ');
-            window.setTimeout(runStep, msPerCharacter());
-            return;
+            engine.lastLetterNode = null;
+        } else if (nextLetter !== engine.lastLetterNode) {
+            const expectedChar = calculateCharacterToType(nextLetter);
+            if (expectedChar) {
+                typeCharacter(expectedChar);
+            }
+            engine.lastLetterNode = nextLetter;
         }
 
-        const expectedChar = calculateCharacterToType(nextLetter);
-        if (!expectedChar) {
-            window.setTimeout(runStep, 16);
-            return;
-        }
-
-        typeCharacter(expectedChar);
-
-        const startedAt = performance.now();
-        const verifyTyped = () => {
-            if (!engine.running) return;
-
-            const wasMarked = nextLetter.classList.contains('correct') || nextLetter.classList.contains('incorrect');
-            if (wasMarked) {
-                window.setTimeout(runStep, msPerCharacter());
-                return;
-            }
-
-            if (performance.now() - startedAt > SETTINGS.verificationTimeoutMs) {
-                window.setTimeout(runStep, msPerCharacter());
-                return;
-            }
-
-            requestAnimationFrame(verifyTyped);
-        };
-
-        requestAnimationFrame(verifyTyped);
+        engine.loopTimer = window.setTimeout(tick, msPerCharacter());
     }
 
     function startTyping() {
-        if (engine.running) return;
-        if (!canType()) return;
+        if (engine.running || !canType()) return;
 
         engine.running = true;
         engine.intentionalErrorsUsed = 0;
-        engine.lastTypedAt = performance.now();
+        engine.lastLetterNode = null;
         console.info(`[Monkeytype Auto Typer] Started at ${SETTINGS.targetWpm} WPM`);
-        runStep();
+        tick();
     }
 
     function matchesHotkey(event) {
         const configuredKey = String(SETTINGS.hotkey.key || '').toLowerCase();
         return (
-            event.key.toLowerCase() === configuredKey &&
+            String(event.key || '').toLowerCase() === configuredKey &&
             Boolean(event.ctrlKey) === Boolean(SETTINGS.hotkey.ctrlKey) &&
             Boolean(event.altKey) === Boolean(SETTINGS.hotkey.altKey) &&
             Boolean(event.shiftKey) === Boolean(SETTINGS.hotkey.shiftKey)
@@ -240,17 +210,13 @@
         if (!SETTINGS.autoStart) return;
 
         const observer = new MutationObserver(() => {
-            if (!engine.running && canType()) {
-                startTyping();
-            }
+            if (!engine.running && canType()) startTyping();
         });
 
         observer.observe(document.body, { childList: true, subtree: true });
 
         window.setInterval(() => {
-            if (!engine.running && canType()) {
-                startTyping();
-            }
+            if (!engine.running && canType()) startTyping();
         }, SETTINGS.pollIntervalMs);
     }
 
