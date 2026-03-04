@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Monkeytype Auto Typer (Accurate, Fast, Mode-Compatible)
+// @name         Monkeytype Auto Typer (Simple, Fast, Accurate)
 // @namespace    https://monkeytype.com/
-// @version      2.1.0
-// @description  Types exactly what Monkeytype expects across words, quotes, punctuation, and numbers modes with higher speed and stability.
+// @version      3.0.0
+// @description  Fast and simple Monkeytype auto-typer that follows active letters for mode accuracy and maintains target WPM.
 // @author       You
 // @match        https://monkeytype.com/*
 // @grant        none
@@ -13,12 +13,11 @@
     'use strict';
 
     const SETTINGS = {
-        targetWpm: 1200,
+        targetWpm: 3000,
         maxIntentionalErrors: 0,
         autoStart: true,
-        pollIntervalMs: 150,
-        minKeyDelayMs: 0,
-        maxKeyDelayMs: 50,
+        schedulerIntervalMs: 10,
+        maxBurstPerTick: 40,
         hotkey: {
             ctrlKey: true,
             altKey: true,
@@ -27,42 +26,36 @@
         }
     };
 
-    const SELECTORS = {
-        activeWord: '#words .word.active',
-        activeLetters: 'letter',
-        wordsInput: '#wordsInput'
-    };
-
     const engine = {
         running: false,
         intentionalErrorsUsed: 0,
-        lastLetterNode: null,
+        charDebt: 0,
+        lastTick: 0,
         loopTimer: null
     };
 
-    function msPerCharacter() {
-        const safeWpm = Math.max(1, Number(SETTINGS.targetWpm) || 1);
-        const computed = 60000 / (safeWpm * 5);
-        return Math.min(SETTINGS.maxKeyDelayMs, Math.max(SETTINGS.minKeyDelayMs, computed));
-    }
-
-    function getWordsInput() {
-        return document.querySelector(SELECTORS.wordsInput);
+    function getInput() {
+        return document.querySelector('#wordsInput');
     }
 
     function getActiveWord() {
-        return document.querySelector(SELECTORS.activeWord);
+        return document.querySelector('#words .word.active');
     }
 
     function canType() {
-        return !!getActiveWord() && !!getWordsInput();
+        return Boolean(getInput() && getActiveWord());
     }
 
-    function getNextUntypedLetterNode() {
+    function msPerCharacter() {
+        const safeWpm = Math.max(1, Number(SETTINGS.targetWpm) || 1);
+        return 60000 / (safeWpm * 5);
+    }
+
+    function getNextUntypedLetter() {
         const activeWord = getActiveWord();
         if (!activeWord) return null;
 
-        const letters = activeWord.querySelectorAll(SELECTORS.activeLetters);
+        const letters = activeWord.querySelectorAll('letter');
         for (const letter of letters) {
             const typed = letter.classList.contains('correct') || letter.classList.contains('incorrect');
             if (!typed) return letter;
@@ -72,50 +65,19 @@
     }
 
     function nextErrorCharacter(char) {
-        if (!char) return char;
-
+        if (!char) return '';
         if (/[a-z]/.test(char)) return char === 'z' ? 'a' : String.fromCharCode(char.charCodeAt(0) + 1);
         if (/[A-Z]/.test(char)) return char === 'Z' ? 'A' : String.fromCharCode(char.charCodeAt(0) + 1);
         if (/[0-9]/.test(char)) return char === '9' ? '0' : String.fromCharCode(char.charCodeAt(0) + 1);
-
         return 'x';
     }
 
-    function emitKey(input, key) {
-        const keyCode = key === ' ' ? 'Space' : undefined;
-        const eventInit = { key, code: keyCode, bubbles: true, cancelable: true, composed: true };
-        input.dispatchEvent(new KeyboardEvent('keydown', eventInit));
-        input.dispatchEvent(new KeyboardEvent('keypress', eventInit));
+    function getExpectedCharacter() {
+        const letter = getNextUntypedLetter();
+        if (!letter) return ' ';
 
-        const beforeInput = new InputEvent('beforeinput', {
-            bubbles: true,
-            cancelable: true,
-            composed: true,
-            data: key,
-            inputType: 'insertText'
-        });
-        input.dispatchEvent(beforeInput);
-
-        if (document.execCommand) {
-            document.execCommand('insertText', false, key);
-        }
-
-        input.dispatchEvent(new InputEvent('input', {
-            bubbles: true,
-            cancelable: false,
-            composed: true,
-            data: key,
-            inputType: 'insertText'
-        }));
-
-        input.dispatchEvent(new KeyboardEvent('keyup', eventInit));
-    }
-
-    function calculateCharacterToType(letterNode) {
-        let character = letterNode?.textContent ?? '';
+        let character = (letter.textContent || '').replace(/\u00A0/g, ' ');
         if (!character) return '';
-
-        character = character.replace(/\u00A0/g, ' ');
 
         if (
             SETTINGS.maxIntentionalErrors > 0 &&
@@ -123,27 +85,67 @@
             /\S/.test(character)
         ) {
             engine.intentionalErrorsUsed += 1;
-            return nextErrorCharacter(character);
+            character = nextErrorCharacter(character);
         }
 
         return character;
     }
 
-    function typeCharacter(char) {
-        const input = getWordsInput();
-        if (!input || !char) return;
+    function emitText(input, text) {
+        const keyboardInit = {
+            key: text,
+            code: text === ' ' ? 'Space' : undefined,
+            bubbles: true,
+            cancelable: true,
+            composed: true
+        };
 
-        input.focus();
-        emitKey(input, char);
+        input.dispatchEvent(new KeyboardEvent('keydown', keyboardInit));
+
+        input.dispatchEvent(new InputEvent('beforeinput', {
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+            data: text,
+            inputType: 'insertText'
+        }));
+
+        if (document.execCommand) {
+            document.execCommand('insertText', false, text);
+        }
+
+        input.dispatchEvent(new InputEvent('input', {
+            bubbles: true,
+            cancelable: false,
+            composed: true,
+            data: text,
+            inputType: 'insertText'
+        }));
+
+        input.dispatchEvent(new KeyboardEvent('keyup', keyboardInit));
+    }
+
+    function typeOneCharacter() {
+        const input = getInput();
+        if (!input) return false;
+
+        if (document.activeElement !== input) {
+            input.focus();
+        }
+
+        const character = getExpectedCharacter();
+        if (!character) return false;
+
+        emitText(input, character);
+        return true;
     }
 
     function stopTyping(reason) {
         if (!engine.running) return;
 
         engine.running = false;
-        engine.lastLetterNode = null;
         if (engine.loopTimer) {
-            clearTimeout(engine.loopTimer);
+            clearInterval(engine.loopTimer);
             engine.loopTimer = null;
         }
         console.info(`[Monkeytype Auto Typer] Stopped: ${reason}`);
@@ -157,20 +159,24 @@
             return;
         }
 
-        const nextLetter = getNextUntypedLetterNode();
+        const now = performance.now();
+        const elapsed = Math.max(0, now - engine.lastTick);
+        engine.lastTick = now;
 
-        if (!nextLetter) {
-            typeCharacter(' ');
-            engine.lastLetterNode = null;
-        } else if (nextLetter !== engine.lastLetterNode) {
-            const expectedChar = calculateCharacterToType(nextLetter);
-            if (expectedChar) {
-                typeCharacter(expectedChar);
-            }
-            engine.lastLetterNode = nextLetter;
+        engine.charDebt += elapsed / msPerCharacter();
+
+        let toType = Math.floor(engine.charDebt);
+        if (toType <= 0) return;
+
+        toType = Math.min(toType, SETTINGS.maxBurstPerTick);
+        let typed = 0;
+
+        while (typed < toType) {
+            if (!typeOneCharacter()) break;
+            typed += 1;
         }
 
-        engine.loopTimer = window.setTimeout(tick, msPerCharacter());
+        engine.charDebt = Math.max(0, engine.charDebt - typed);
     }
 
     function startTyping() {
@@ -178,9 +184,11 @@
 
         engine.running = true;
         engine.intentionalErrorsUsed = 0;
-        engine.lastLetterNode = null;
+        engine.charDebt = 0;
+        engine.lastTick = performance.now();
+
+        engine.loopTimer = window.setInterval(tick, SETTINGS.schedulerIntervalMs);
         console.info(`[Monkeytype Auto Typer] Started at ${SETTINGS.targetWpm} WPM`);
-        tick();
     }
 
     function matchesHotkey(event) {
@@ -193,22 +201,18 @@
         );
     }
 
-    function setupHotkey() {
-        document.addEventListener('keydown', (event) => {
-            if (!matchesHotkey(event)) return;
+    document.addEventListener('keydown', (event) => {
+        if (!matchesHotkey(event)) return;
 
-            event.preventDefault();
-            if (engine.running) {
-                stopTyping('Hotkey toggle');
-            } else {
-                startTyping();
-            }
-        });
-    }
+        event.preventDefault();
+        if (engine.running) {
+            stopTyping('Hotkey toggle');
+        } else {
+            startTyping();
+        }
+    });
 
-    function setupAutoStart() {
-        if (!SETTINGS.autoStart) return;
-
+    if (SETTINGS.autoStart) {
         const observer = new MutationObserver(() => {
             if (!engine.running && canType()) startTyping();
         });
@@ -217,11 +221,8 @@
 
         window.setInterval(() => {
             if (!engine.running && canType()) startTyping();
-        }, SETTINGS.pollIntervalMs);
+        }, 120);
     }
-
-    setupHotkey();
-    setupAutoStart();
 
     console.info('[Monkeytype Auto Typer] Loaded. Toggle with Ctrl+Alt+S.');
 })();
